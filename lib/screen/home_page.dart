@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import '../services/api_service.dart';
-import '../main.dart';class HomePage extends StatefulWidget {
+import '../main.dart';
+
+class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
   @override
@@ -19,23 +22,61 @@ class _HomePageState extends State<HomePage> {
   bool _loadingStatus = true;
   bool _actionInProgress = false;
 
+  // Live clock
+  DateTime _now = DateTime.now();
+  Timer? _clockTimer;
+
   @override
   void initState() {
     super.initState();
+    _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _now = DateTime.now());
+    });
     _fetchStatus();
+  }
+
+  @override
+  void dispose() {
+    _clockTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _fetchStatus() async {
     setState(() => _loadingStatus = true);
-    final result = await ApiService.getStatus();
-    if (!mounted) return;
-    setState(() {
-      _state = result['state'] ?? 'not_logged_in';
-      _signinTime = result['signin_time'];
-      _totalBreak = result['total_break'] ?? 0;
-      _limitReached = result['limit_reached'] ?? false;
-      _loadingStatus = false;
-    });
+    try {
+      final result = await ApiService.getStatus();
+      if (!mounted) return;
+      setState(() {
+        _state = result['state']?.toString() ?? 'not_logged_in';
+        _signinTime = result['signin_time']?.toString();
+        _totalBreak = _asInt(result['total_break']);
+        _limitReached = _asBool(result['limit_reached']);
+      });
+    } catch (e) {
+      debugPrint('fetchStatus error: $e');
+      _showMessage('Could not load attendance status');
+    } finally {
+      // chahe success ho ya error, spinner hamesha clear ho
+      if (mounted) setState(() => _loadingStatus = false);
+    }
+  }
+
+  // API kabhi number ko string bhej sakti hai (e.g. "5", "1") — safe parsing
+  int _asInt(dynamic v) {
+    if (v == null) return 0;
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    if (v is String) return int.tryParse(v) ?? 0;
+    return 0;
+  }
+
+  bool _asBool(dynamic v) {
+    if (v == null) return false;
+    if (v is bool) return v;
+    if (v is num) return v != 0;
+    if (v is String) return v == '1' || v.toLowerCase() == 'true';
+    return false;
   }
 
   Future<Position?> _getLocation() async {
@@ -123,6 +164,21 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ---------- Date / time formatting helpers ----------
+  String _formatDate(DateTime d) {
+    return '${d.day.toString().padLeft(2, '0')}-${d.month.toString().padLeft(2, '0')}-${d.year}';
+  }
+
+  String _formatTime(DateTime d) {
+    final hour24 = d.hour;
+    final period = hour24 >= 12 ? 'PM' : 'AM';
+    int hour12 = hour24 % 12;
+    if (hour12 == 0) hour12 = 12;
+    final minute = d.minute.toString().padLeft(2, '0');
+    final second = d.second.toString().padLeft(2, '0');
+    return '${hour12.toString().padLeft(2, '0')}:$minute:$second $period';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -191,33 +247,25 @@ class _HomePageState extends State<HomePage> {
                 "Today's Attendance",
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
-              if (_loadingStatus)
-                const SizedBox(
-                  height: 14,
-                  width: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              else
-                Text(
-                  isWorking
-                      ? 'Working'
-                      : isOnBreak
-                      ? 'On Break'
-                      : isLoggedOut
-                      ? 'Completed'
-                      : 'Not logged in',
-                  style: TextStyle(
-                    color: isWorking
-                        ? Colors.green
-                        : isOnBreak
-                        ? Colors.orange
-                        : Colors.grey,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13,
+              // Live ticking clock
+              Row(
+                children: [
+                  const Icon(Icons.access_time, size: 14, color: Colors.grey),
+                  const SizedBox(width: 4),
+                  Text(
+                    _formatTime(_now),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey,
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
-                ),
+                ],
+              ),
             ],
           ),
+          const SizedBox(height: 10),
+          _buildStatusBanner(isWorking: isWorking, isOnBreak: isOnBreak, isLoggedOut: isLoggedOut),
           const SizedBox(height: 14),
           Row(
             children: [
@@ -260,22 +308,111 @@ class _HomePageState extends State<HomePage> {
               ),
             ],
           ),
-          const SizedBox(height: 14),
+          if (_limitReached) ...[
+            const SizedBox(height: 10),
+            const Text(
+              'Break limit reached',
+              style: TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Web version jaisa colored status pill: Working / On Break / Not Logged In / Completed
+  Widget _buildStatusBanner({
+    required bool isWorking,
+    required bool isOnBreak,
+    required bool isLoggedOut,
+  }) {
+    if (_loadingStatus) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF0F0F0),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: const Row(
+          children: [
+            SizedBox(
+              height: 14,
+              width: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 10),
+            Text('Checking status...', style: TextStyle(fontSize: 13, color: Colors.grey)),
+          ],
+        ),
+      );
+    }
+
+    final today = _formatDate(DateTime.now());
+
+    late Color bgColor;
+    late IconData icon;
+    late String mainLabel;
+    String? subLabel;
+
+    if (isWorking) {
+      bgColor = const Color(0xFF34B857);
+      icon = Icons.check_circle;
+      mainLabel = 'Working — $today';
+      subLabel = _signinTime != null ? 'Logged in: $_signinTime' : null;
+    } else if (isOnBreak) {
+      bgColor = const Color(0xFFF4B740);
+      icon = Icons.pause_circle_filled;
+      mainLabel = 'On Break — $today';
+      subLabel = 'Break used: $_totalBreak min / 60 min';
+    } else if (isLoggedOut) {
+      bgColor = const Color(0xFF8A94A6);
+      icon = Icons.task_alt;
+      mainLabel = 'Completed — $today';
+      subLabel = _totalBreak > 0 ? 'Break used: $_totalBreak min / 60 min' : null;
+    } else {
+      bgColor = const Color(0xFFE9455A);
+      icon = Icons.radio_button_checked;
+      mainLabel = 'Not Logged In';
+      subLabel = null;
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                _signinTime != null ? 'Logged in: $_signinTime' : 'Not checked in yet',
-                style: const TextStyle(color: Colors.grey, fontSize: 12),
-              ),
-              if (_limitReached)
-                const Text(
-                  'Break limit reached',
-                  style: TextStyle(
-                      color: Colors.red, fontSize: 12, fontWeight: FontWeight.w600),
+              Icon(icon, color: Colors.white, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  mainLabel,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
                 ),
+              ),
             ],
           ),
+          if (subLabel != null) ...[
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.only(left: 26),
+              child: Text(
+                subLabel,
+                style: const TextStyle(color: Colors.white, fontSize: 11.5),
+              ),
+            ),
+          ],
         ],
       ),
     );
